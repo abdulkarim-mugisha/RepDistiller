@@ -1,8 +1,8 @@
 """
-Utilities for RDX-based curriculum learning in RepDistiller.
+Utilities for RDX-based curriculum learning and triplet mining in RepDistiller.
 
 Provides embedding extraction from RepDistiller models and orchestrates
-RDX per-sample difficulty scoring for curriculum-ordered training.
+RDX per-sample difficulty scoring and triplet table computation.
 """
 
 from __future__ import print_function
@@ -10,7 +10,7 @@ from __future__ import print_function
 import numpy as np
 import torch
 
-from rdx.sampling import compute_rdx_scores
+from rdx.sampling import compute_rdx_scores, compute_rdx_triplet_table
 
 
 @torch.no_grad()
@@ -99,3 +99,49 @@ def compute_rdx_curriculum_order(model_s, model_t, embed_loader, device,
     print(f"    difficulty range: [{scores.min():.4f}, {scores.max():.4f}]")
 
     return sorted_indices, scores
+
+
+def compute_rdx_triplet_lookup(model_s, model_t, embed_loader, device,
+                                anchor_n=0, gamma=0.1, beta=5.0,
+                                random_state=42):
+    """
+    Compute per-sample positive and negative indices for RDX triplet loss.
+
+    Steps:
+        1. Extract student and teacher embeddings.
+        2. Optionally select M anchor points.
+        3. Row-at-a-time RDX diff computation → argmin (positive) and
+           argmax (negative) per sample.
+
+    Returns:
+        pos_idx: (N,) int64 array — positive index for each sample.
+        neg_idx: (N,) int64 array — negative index for each sample.
+    """
+    print("==> RDX Triplet: extracting student embeddings...")
+    emb_s = extract_embeddings(model_s, embed_loader, device)
+    print(f"    shape = {emb_s.shape}")
+
+    print("==> RDX Triplet: extracting teacher embeddings...")
+    emb_t = extract_embeddings(model_t, embed_loader, device)
+    print(f"    shape = {emb_t.shape}")
+
+    N = len(emb_s)
+
+    anchor_idx = None
+    if 0 < anchor_n < N:
+        np.random.seed(random_state)
+        anchor_idx = np.sort(
+            np.random.choice(N, size=anchor_n, replace=False))
+        print(f"==> RDX Triplet: using {anchor_n} anchor points")
+    else:
+        print(f"==> RDX Triplet: using all {N} samples as anchors")
+
+    print("==> RDX Triplet: mining positive/negative pairs...")
+    pos_idx, neg_idx = compute_rdx_triplet_table(
+        emb_s, emb_t,
+        anchor_idx=anchor_idx,
+        gamma=gamma,
+        beta=beta,
+    )
+
+    return pos_idx, neg_idx

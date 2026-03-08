@@ -95,6 +95,8 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
     for idx, data in enumerate(train_loader):
         if opt.distill in ['crd']:
             input, target, index, contrast_idx = data
+        elif opt.distill == 'rdx_triplet':
+            input, target, index, pos_input, neg_input = data
         else:
             input, target, index = data
         data_time.update(time.time() - end)
@@ -106,6 +108,9 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
             index = index.cuda()
             if opt.distill in ['crd']:
                 contrast_idx = contrast_idx.cuda()
+            if opt.distill == 'rdx_triplet':
+                pos_input = pos_input.float().cuda()
+                neg_input = neg_input.float().cuda()
 
         # ===================forward=====================
         preact = False
@@ -178,6 +183,19 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
             factor_s = module_list[1](feat_s[-2])
             factor_t = module_list[2](feat_t[-2], is_factor=True)
             loss_kd = criterion_kd(factor_s, factor_t)
+        elif opt.distill == 'rdx_triplet':
+            feat_pos, _ = model_s(pos_input, is_feat=True, preact=preact)
+            feat_neg, _ = model_s(neg_input, is_feat=True, preact=preact)
+            f_a = feat_s[-1]
+            f_p = feat_pos[-1]
+            f_n = feat_neg[-1]
+            if f_a.dim() > 2:
+                f_a = f_a.mean(dim=[2, 3])
+            if f_p.dim() > 2:
+                f_p = f_p.mean(dim=[2, 3])
+            if f_n.dim() > 2:
+                f_n = f_n.mean(dim=[2, 3])
+            loss_kd = criterion_kd(f_a, f_p, f_n)
         else:
             raise NotImplementedError(opt.distill)
 

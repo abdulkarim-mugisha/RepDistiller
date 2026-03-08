@@ -8,6 +8,7 @@ from .KD import DistillKL
 from .KDSVD import KDSVD
 from .NST import NSTLoss
 from .PKT import PKT
+from .RDXTriplet import RDXTripletLoss
 from .RKD import RKDLoss
 from .SP import Similarity
 from .VID import VIDLoss

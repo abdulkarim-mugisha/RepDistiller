@@ -213,6 +213,91 @@ def get_cifar100_dataloaders_sample(batch_size=128, num_workers=8, k=4096, mode=
     return train_loader, test_loader, n_data
 
 
+class CIFAR100RDXTriplet(CIFAR100Instance):
+    """CIFAR100 dataset that also returns positive and negative images
+    according to an RDX-derived lookup table.
+
+    Before :meth:`update_triplet_table` is called, the positive and
+    negative default to the anchor itself, producing zero triplet loss.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pos_idx = None
+        self._neg_idx = None
+
+    def update_triplet_table(self, pos_idx, neg_idx):
+        """Set per-sample positive/negative indices (original dataset indices)."""
+        self._pos_idx = pos_idx
+        self._neg_idx = neg_idx
+
+    def __getitem__(self, index):
+        img, target = self.data[index], self.targets[index]
+        img = Image.fromarray(img)
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if self._pos_idx is not None:
+            pos_i = int(self._pos_idx[index])
+            neg_i = int(self._neg_idx[index])
+        else:
+            pos_i = index
+            neg_i = index
+
+        pos_img = Image.fromarray(self.data[pos_i])
+        neg_img = Image.fromarray(self.data[neg_i])
+        if self.transform is not None:
+            pos_img = self.transform(pos_img)
+            neg_img = self.transform(neg_img)
+
+        return img, target, index, pos_img, neg_img
+
+
+def get_cifar100_dataloaders_rdx_triplet(batch_size=128, num_workers=8,
+                                          selected_indices=None):
+    """
+    CIFAR-100 dataloaders for RDX triplet training.
+
+    Returns the *train_set* handle so that the training loop can call
+    ``train_set.update_triplet_table(pos, neg)`` when refreshing.
+
+    When *selected_indices* is given, the training DataLoader wraps a
+    ``Subset`` (for curriculum pacing) but triplet lookups still index
+    into the full underlying dataset.
+    """
+    data_folder = get_data_folder()
+
+    train_transform = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+    ])
+    test_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+    ])
+
+    full_train_set = CIFAR100RDXTriplet(root=data_folder, download=True,
+                                         train=True, transform=train_transform)
+    n_data = len(full_train_set)
+
+    if selected_indices is not None:
+        train_set = Subset(full_train_set, selected_indices)
+    else:
+        train_set = full_train_set
+
+    train_loader = DataLoader(train_set, batch_size=batch_size,
+                              shuffle=True, num_workers=num_workers)
+
+    test_set = datasets.CIFAR100(root=data_folder, download=True,
+                                 train=False, transform=test_transform)
+    test_loader = DataLoader(test_set, batch_size=int(batch_size / 2),
+                             shuffle=False, num_workers=int(num_workers / 2))
+
+    return train_loader, test_loader, n_data, full_train_set
+
+
 def get_cifar100_embed_loader(batch_size=128, num_workers=8):
     """
     Deterministic CIFAR-100 dataloader for embedding extraction.

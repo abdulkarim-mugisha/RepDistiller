@@ -22,16 +22,17 @@ from models.util import Connector, Translator, Paraphraser
 
 from dataset.cifar100 import get_cifar100_dataloaders, get_cifar100_dataloaders_sample
 from dataset.cifar100 import get_cifar100_dataloaders_rdx, get_cifar100_embed_loader
+from dataset.cifar100 import get_cifar100_dataloaders_rdx_triplet
 
 from helper.util import adjust_learning_rate
 
 from distiller_zoo import DistillKL, HintLoss, Attention, Similarity, Correlation, VIDLoss, RKDLoss
-from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss
+from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss, RDXTripletLoss
 from crd.criterion import CRDLoss
 
 from helper.loops import train_distill as train, validate
 from helper.pretrain import init
-from helper.rdx_utils import compute_rdx_curriculum_order
+from helper.rdx_utils import compute_rdx_curriculum_order, compute_rdx_triplet_lookup
 
 
 def parse_option():
@@ -69,7 +70,8 @@ def parse_option():
     # distillation
     parser.add_argument('--distill', type=str, default='kd', choices=['kd', 'hint', 'attention', 'similarity',
                                                                       'correlation', 'vid', 'crd', 'kdsvd', 'fsp',
-                                                                      'rkd', 'pkt', 'abound', 'factor', 'nst'])
+                                                                      'rkd', 'pkt', 'abound', 'factor', 'nst',
+                                                                      'rdx_triplet'])
     parser.add_argument('--trial', type=str, default='1', help='trial id')
 
     parser.add_argument('-r', '--gamma', type=float, default=1, help='weight for classification')
@@ -115,6 +117,10 @@ def parse_option():
     parser.add_argument('--curriculum_pace_epochs', default=100, type=int,
                         help='epochs over which to ramp from start_frac to 1.0')
 
+    # RDX triplet distillation
+    parser.add_argument('--rdx_triplet_margin', default=1.0, type=float,
+                        help='margin for RDX triplet loss')
+
     opt = parser.parse_args()
 
     # set different learning rate from these 4 models
@@ -136,15 +142,13 @@ def parse_option():
 
     opt.model_t = get_teacher_name(opt.path_t)
 
+    name_parts = 'S:{}_T:{}_{}_{}_r:{}_a:{}_b:{}'.format(
+        opt.model_s, opt.model_t, opt.dataset, opt.distill,
+        opt.gamma, opt.alpha, opt.beta)
     if opt.sampling == 'curriculum':
-        opt.model_name = 'S:{}_T:{}_{}_{}_r:{}_a:{}_b:{}_curr{}-{}e_{}' \
-            .format(opt.model_s, opt.model_t, opt.dataset, opt.distill,
-                    opt.gamma, opt.alpha, opt.beta, opt.curriculum_start_frac,
-                    opt.curriculum_pace_epochs, opt.trial)
-    else:
-        opt.model_name = 'S:{}_T:{}_{}_{}_r:{}_a:{}_b:{}_{}'.format(
-            opt.model_s, opt.model_t, opt.dataset, opt.distill,
-            opt.gamma, opt.alpha, opt.beta, opt.trial)
+        name_parts += '_curr{}-{}e'.format(opt.curriculum_start_frac,
+                                           opt.curriculum_pace_epochs)
+    opt.model_name = '{}_{}'.format(name_parts, opt.trial)
 
     opt.tb_folder = os.path.join(opt.tb_path, opt.model_name)
     if not os.path.isdir(opt.tb_folder):
@@ -170,7 +174,8 @@ def load_teacher(model_path, n_cls):
     print('==> loading teacher model')
     model_t = get_teacher_name(model_path)
     model = model_dict[model_t](num_classes=n_cls)
-    model.load_state_dict(torch.load(model_path, weights_only=False)['model'])
+    map_loc = None if torch.cuda.is_available() else 'cpu'
+    model.load_state_dict(torch.load(model_path, weights_only=False, map_location=map_loc)['model'])
     print('==> done')
     return model
 
@@ -203,13 +208,22 @@ def main():
 
     # dataloader
     embed_loader = None
+    rdx_train_set = None
+    use_curriculum = opt.sampling == 'curriculum'
+
     if opt.dataset == 'cifar100':
         if opt.distill in ['crd']:
             train_loader, val_loader, n_data = get_cifar100_dataloaders_sample(batch_size=opt.batch_size,
                                                                                num_workers=opt.num_workers,
                                                                                k=opt.nce_k,
                                                                                mode=opt.mode)
-        elif opt.sampling == 'curriculum':
+        elif opt.distill == 'rdx_triplet':
+            train_loader, val_loader, n_data, rdx_train_set = \
+                get_cifar100_dataloaders_rdx_triplet(
+                    batch_size=opt.batch_size, num_workers=opt.num_workers)
+            embed_loader = get_cifar100_embed_loader(
+                batch_size=opt.batch_size, num_workers=opt.num_workers)
+        elif use_curriculum:
             train_loader, val_loader, n_data = get_cifar100_dataloaders_rdx(
                 batch_size=opt.batch_size, num_workers=opt.num_workers)
             embed_loader = get_cifar100_embed_loader(
@@ -322,6 +336,8 @@ def main():
         init(model_s, model_t, init_trainable_list, criterion_kd, train_loader, logger, opt)
         # classification training
         pass
+    elif opt.distill == 'rdx_triplet':
+        criterion_kd = RDXTripletLoss(margin=opt.rdx_triplet_margin)
     else:
         raise NotImplementedError(opt.distill)
 
@@ -352,10 +368,22 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     for epoch in range(1, opt.epochs + 1):
 
+        refresh = _should_refresh_rdx(epoch, opt)
+
+        # --- RDX triplet table refresh ---
+        if opt.distill == 'rdx_triplet' and refresh:
+            print("==> Refreshing RDX triplet table (epoch {})...".format(epoch))
+            pos_idx, neg_idx = compute_rdx_triplet_lookup(
+                model_s, model_t, embed_loader, device,
+                anchor_n=opt.rdx_anchor_n,
+                gamma=opt.rdx_gamma,
+                beta=opt.rdx_beta,
+            )
+            rdx_train_set.update_triplet_table(pos_idx, neg_idx)
+
         # --- Curriculum learning ---
-        if opt.sampling == 'curriculum':
-            rescore = _should_refresh_rdx(epoch, opt)
-            if rescore or curriculum_order is None:
+        if use_curriculum:
+            if refresh or curriculum_order is None:
                 print("==> Scoring samples for curriculum (epoch {})...".format(epoch))
                 curriculum_order, _ = compute_rdx_curriculum_order(
                     model_s, model_t, embed_loader, device,
