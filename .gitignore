@@ -9,7 +9,6 @@ ckpts/
 tmp*.py
 
 *.pdf
-save/student_tensorboards/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
