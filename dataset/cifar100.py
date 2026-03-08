@@ -215,11 +215,13 @@ class CIFAR100RDXTriplet(CIFAR100Instance):
         super().__init__(*args, **kwargs)
         self._pos_idx = None
         self._neg_idx = None
+        self._weights = None
 
-    def update_triplet_table(self, pos_idx, neg_idx):
-        """Set per-sample positive/negative indices (original dataset indices)."""
+    def update_triplet_table(self, pos_idx, neg_idx, weights):
+        """Set per-sample positive/negative indices and affinity weights."""
         self._pos_idx = pos_idx
         self._neg_idx = neg_idx
+        self._weights = weights
 
     def __getitem__(self, index):
         img, target = self.data[index], self.targets[index]
@@ -230,9 +232,11 @@ class CIFAR100RDXTriplet(CIFAR100Instance):
         if self._pos_idx is not None:
             pos_i = int(self._pos_idx[index])
             neg_i = int(self._neg_idx[index])
+            w = float(self._weights[index])
         else:
             pos_i = index
             neg_i = index
+            w = 1.0
 
         pos_img = Image.fromarray(self.data[pos_i])
         neg_img = Image.fromarray(self.data[neg_i])
@@ -240,7 +244,7 @@ class CIFAR100RDXTriplet(CIFAR100Instance):
             pos_img = self.transform(pos_img)
             neg_img = self.transform(neg_img)
 
-        return img, target, index, pos_img, neg_img
+        return img, target, index, pos_img, neg_img, w
 
 
 def get_cifar100_dataloaders_rdx_triplet(batch_size=128, num_workers=8,

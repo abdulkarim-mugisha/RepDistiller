@@ -337,7 +337,7 @@ def main():
         # classification training
         pass
     elif opt.distill == 'rdx_triplet':
-        criterion_kd = RDXTripletLoss(margin=opt.rdx_triplet_margin)
+        criterion_kd = RDXTripletLoss()
     else:
         raise NotImplementedError(opt.distill)
 
@@ -373,13 +373,13 @@ def main():
         # --- RDX triplet table refresh ---
         if opt.distill == 'rdx_triplet' and refresh:
             print("==> Refreshing RDX triplet table (epoch {})...".format(epoch))
-            pos_idx, neg_idx = compute_rdx_triplet_lookup(
+            pos_idx, neg_idx, weights = compute_rdx_triplet_lookup(
                 model_s, model_t, embed_loader, device,
                 anchor_n=opt.rdx_anchor_n,
                 gamma=opt.rdx_gamma,
                 beta=opt.rdx_beta,
             )
-            rdx_train_set.update_triplet_table(pos_idx, neg_idx)
+            rdx_train_set.update_triplet_table(pos_idx, neg_idx, weights)
 
         # --- Curriculum learning ---
         if use_curriculum:

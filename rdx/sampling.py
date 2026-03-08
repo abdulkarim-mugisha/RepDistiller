@@ -148,6 +148,9 @@ def compute_rdx_triplet_table(emb_s, emb_t, anchor_idx=None,
     Returns:
         pos_idx: (N,) int64 array — global dataset index of each positive.
         neg_idx: (N,) int64 array — global dataset index of each negative.
+        weights: (N,) float32 array — average of teacher-unique (am_10)
+                 and student-unique (am_01) affinities for the selected
+                 positive and negative, capturing overall RDX signal strength.
     """
     N = len(emb_s)
     (emb_s_t, emb_t_t, anc_s, anc_t,
@@ -156,6 +159,7 @@ def compute_rdx_triplet_table(emb_s, emb_t, anchor_idx=None,
 
     pos_idx = np.zeros(N, dtype=np.int64)
     neg_idx = np.zeros(N, dtype=np.int64)
+    weights = np.ones(N, dtype=np.float32)
 
     use_anchor_map = anchor_idx is not None
 
@@ -164,17 +168,23 @@ def compute_rdx_triplet_table(emb_s, emb_t, anchor_idx=None,
 
     for start in range(0, N, batch_size):
         end = min(start + batch_size, N)
+        B = end - start
 
         diff = _compute_diff_batch(emb_s_t, emb_t_t, anc_s, anc_t,
                                     start, end, gamma, device)
 
-        # mask self so it is never selected as pos or neg
         _mask_self(diff, start, M, anchor_set, anchor_to_col, device, 0.0)
 
-        # positive = most teacher-unique = min diff per row
-        pos_cols = diff.argmin(dim=1).cpu().numpy()
-        # negative = most student-unique = max diff per row
-        neg_cols = diff.argmax(dim=1).cpu().numpy()
+        pos_cols = diff.argmin(dim=1)
+        neg_cols = diff.argmax(dim=1)
+
+        row_idx = torch.arange(B, device=device)
+        pos_aff = torch.exp(-beta * diff[row_idx, pos_cols])   # am_10
+        neg_aff = torch.exp(beta * diff[row_idx, neg_cols])    # am_01
+        weights[start:end] = ((pos_aff + neg_aff) / 2).cpu().numpy()
+
+        pos_cols = pos_cols.cpu().numpy()
+        neg_cols = neg_cols.cpu().numpy()
 
         if use_anchor_map:
             pos_idx[start:end] = anchor_idx[pos_cols]
@@ -183,4 +193,4 @@ def compute_rdx_triplet_table(emb_s, emb_t, anchor_idx=None,
             pos_idx[start:end] = pos_cols
             neg_idx[start:end] = neg_cols
 
-    return pos_idx, neg_idx
+    return pos_idx, neg_idx, weights

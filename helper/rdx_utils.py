@@ -116,6 +116,7 @@ def compute_rdx_triplet_lookup(model_s, model_t, embed_loader, device,
     Returns:
         pos_idx: (N,) int64 array — positive index for each sample.
         neg_idx: (N,) int64 array — negative index for each sample.
+        weights: (N,) float32 array — per-sample RDX affinity weights.
     """
     print("==> RDX Triplet: extracting student embeddings...")
     emb_s = extract_embeddings(model_s, embed_loader, device)
@@ -137,11 +138,11 @@ def compute_rdx_triplet_lookup(model_s, model_t, embed_loader, device,
         print(f"==> RDX Triplet: using all {N} samples as anchors")
 
     print("==> RDX Triplet: mining positive/negative pairs...")
-    pos_idx, neg_idx = compute_rdx_triplet_table(
+    pos_idx, neg_idx, weights = compute_rdx_triplet_table(
         emb_s, emb_t,
         anchor_idx=anchor_idx,
         gamma=gamma,
         beta=beta,
     )
 
-    return pos_idx, neg_idx
+    return pos_idx, neg_idx, weights

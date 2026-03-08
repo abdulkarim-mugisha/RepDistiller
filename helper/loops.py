@@ -96,7 +96,7 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
         if opt.distill in ['crd']:
             input, target, index, contrast_idx = data
         elif opt.distill == 'rdx_triplet':
-            input, target, index, pos_input, neg_input = data
+            input, target, index, pos_input, neg_input, rdx_weight = data
         else:
             input, target, index = data
         data_time.update(time.time() - end)
@@ -111,6 +111,7 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
             if opt.distill == 'rdx_triplet':
                 pos_input = pos_input.float().cuda()
                 neg_input = neg_input.float().cuda()
+                rdx_weight = rdx_weight.float().cuda()
 
         # ===================forward=====================
         preact = False
@@ -195,7 +196,7 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
                 f_p = f_p.mean(dim=[2, 3])
             if f_n.dim() > 2:
                 f_n = f_n.mean(dim=[2, 3])
-            loss_kd = criterion_kd(f_a, f_p, f_n)
+            loss_kd = criterion_kd(f_a, f_p, f_n, rdx_weight)
         else:
             raise NotImplementedError(opt.distill)
 
