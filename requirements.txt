@@ -1,0 +1,8 @@
+numpy
+pillow
+tensorboard_logger
+torch
+torchvision
+tensorflow
+scikit-learn
+scipy

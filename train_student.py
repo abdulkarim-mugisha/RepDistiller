@@ -21,6 +21,7 @@ from models.util import Embed, ConvReg, LinearEmbed
 from models.util import Connector, Translator, Paraphraser
 
 from dataset.cifar100 import get_cifar100_dataloaders, get_cifar100_dataloaders_sample
+from dataset.cifar100 import get_cifar100_dataloaders_rdx, get_cifar100_embed_loader
 
 from helper.util import adjust_learning_rate
 
@@ -30,6 +31,7 @@ from crd.criterion import CRDLoss
 
 from helper.loops import train_distill as train, validate
 from helper.pretrain import init
+from helper.rdx_utils import compute_rdx_curriculum_order
 
 
 def parse_option():
@@ -87,6 +89,32 @@ def parse_option():
     # hint layer
     parser.add_argument('--hint_layer', default=2, type=int, choices=[0, 1, 2, 3, 4])
 
+    # RDX curriculum learning
+    parser.add_argument('--sampling', default='standard', type=str,
+                        choices=['standard', 'curriculum'],
+                        help='training-set sampling strategy')
+    parser.add_argument('--rdx_start_epoch', default=1, type=int,
+                        help='epoch at which RDX scoring begins '
+                             '(earlier epochs use the full dataset)')
+    parser.add_argument('--rdx_refresh_epochs', default=0, type=int,
+                        help='re-score samples every N epochs after start '
+                             '(0 = score once)')
+    parser.add_argument('--rdx_anchor_n', default=0, type=int,
+                        help='number of anchor samples for RDX scoring '
+                             '(0 = use all samples)')
+    parser.add_argument('--rdx_gamma', default=0.1, type=float,
+                        help='RDX difference saturation parameter')
+    parser.add_argument('--rdx_beta', default=5.0, type=float,
+                        help='RDX affinity sharpness parameter')
+    parser.add_argument('--rdx_kna_k', default=8, type=int,
+                        help='KNA neighborhood size')
+
+    # Curriculum learning
+    parser.add_argument('--curriculum_start_frac', default=0.3, type=float,
+                        help='initial fraction of easiest samples to train on')
+    parser.add_argument('--curriculum_pace_epochs', default=100, type=int,
+                        help='epochs over which to ramp from start_frac to 1.0')
+
     opt = parser.parse_args()
 
     # set different learning rate from these 4 models
@@ -108,8 +136,15 @@ def parse_option():
 
     opt.model_t = get_teacher_name(opt.path_t)
 
-    opt.model_name = 'S:{}_T:{}_{}_{}_r:{}_a:{}_b:{}_{}'.format(opt.model_s, opt.model_t, opt.dataset, opt.distill,
-                                                                opt.gamma, opt.alpha, opt.beta, opt.trial)
+    if opt.sampling == 'curriculum':
+        opt.model_name = 'S:{}_T:{}_{}_{}_r:{}_a:{}_b:{}_curr{}-{}e_{}' \
+            .format(opt.model_s, opt.model_t, opt.dataset, opt.distill,
+                    opt.gamma, opt.alpha, opt.beta, opt.curriculum_start_frac,
+                    opt.curriculum_pace_epochs, opt.trial)
+    else:
+        opt.model_name = 'S:{}_T:{}_{}_{}_r:{}_a:{}_b:{}_{}'.format(
+            opt.model_s, opt.model_t, opt.dataset, opt.distill,
+            opt.gamma, opt.alpha, opt.beta, opt.trial)
 
     opt.tb_folder = os.path.join(opt.tb_path, opt.model_name)
     if not os.path.isdir(opt.tb_folder):
@@ -135,9 +170,27 @@ def load_teacher(model_path, n_cls):
     print('==> loading teacher model')
     model_t = get_teacher_name(model_path)
     model = model_dict[model_t](num_classes=n_cls)
-    model.load_state_dict(torch.load(model_path)['model'])
+    model.load_state_dict(torch.load(model_path, weights_only=False)['model'])
     print('==> done')
     return model
+
+
+def _should_refresh_rdx(epoch, opt):
+    """Return True when the RDX training subset should be (re)computed."""
+    if epoch == opt.rdx_start_epoch:
+        return True
+    if opt.rdx_refresh_epochs > 0 and epoch > opt.rdx_start_epoch:
+        return (epoch - opt.rdx_start_epoch) % opt.rdx_refresh_epochs == 0
+    return False
+
+
+def _curriculum_fraction(epoch, opt):
+    """Fraction of samples (easiest-first) to use at this epoch."""
+    if epoch < opt.rdx_start_epoch:
+        return 1.0
+    elapsed = epoch - opt.rdx_start_epoch
+    progress = elapsed / max(1, opt.curriculum_pace_epochs)
+    return min(1.0, opt.curriculum_start_frac + (1.0 - opt.curriculum_start_frac) * progress)
 
 
 def main():
@@ -149,12 +202,18 @@ def main():
     logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
 
     # dataloader
+    embed_loader = None
     if opt.dataset == 'cifar100':
         if opt.distill in ['crd']:
             train_loader, val_loader, n_data = get_cifar100_dataloaders_sample(batch_size=opt.batch_size,
                                                                                num_workers=opt.num_workers,
                                                                                k=opt.nce_k,
                                                                                mode=opt.mode)
+        elif opt.sampling == 'curriculum':
+            train_loader, val_loader, n_data = get_cifar100_dataloaders_rdx(
+                batch_size=opt.batch_size, num_workers=opt.num_workers)
+            embed_loader = get_cifar100_embed_loader(
+                batch_size=opt.batch_size, num_workers=opt.num_workers)
         else:
             train_loader, val_loader, n_data = get_cifar100_dataloaders(batch_size=opt.batch_size,
                                                                         num_workers=opt.num_workers,
@@ -162,6 +221,8 @@ def main():
         n_cls = 100
     else:
         raise NotImplementedError(opt.dataset)
+
+    curriculum_order = None
 
     # model
     model_t = load_teacher(opt.path_t, n_cls)
@@ -288,7 +349,32 @@ def main():
     print('teacher accuracy: ', teacher_acc)
 
     # routine
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     for epoch in range(1, opt.epochs + 1):
+
+        # --- Curriculum learning ---
+        if opt.sampling == 'curriculum':
+            rescore = _should_refresh_rdx(epoch, opt)
+            if rescore or curriculum_order is None:
+                print("==> Scoring samples for curriculum (epoch {})...".format(epoch))
+                curriculum_order, _ = compute_rdx_curriculum_order(
+                    model_s, model_t, embed_loader, device,
+                    anchor_n=opt.rdx_anchor_n,
+                    gamma=opt.rdx_gamma,
+                    beta=opt.rdx_beta,
+                    kna_k=opt.rdx_kna_k,
+                )
+
+            frac = _curriculum_fraction(epoch, opt)
+            n_use = max(opt.batch_size, int(n_data * frac))
+            selected = curriculum_order[:n_use].tolist()
+            train_loader, _, _ = get_cifar100_dataloaders_rdx(
+                batch_size=opt.batch_size,
+                num_workers=opt.num_workers,
+                selected_indices=selected,
+            )
+            print("==> Curriculum: using {}/{} samples ({:.0f}%)".format(
+                n_use, n_data, frac * 100))
 
         adjust_learning_rate(epoch, opt, optimizer)
         print("==> training...")

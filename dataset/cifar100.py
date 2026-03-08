@@ -3,7 +3,7 @@ from __future__ import print_function
 import os
 import socket
 import numpy as np
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 from PIL import Image
 
@@ -209,5 +209,69 @@ def get_cifar100_dataloaders_sample(batch_size=128, num_workers=8, k=4096, mode=
                              batch_size=int(batch_size/2),
                              shuffle=False,
                              num_workers=int(num_workers/2))
+
+    return train_loader, test_loader, n_data
+
+
+def get_cifar100_embed_loader(batch_size=128, num_workers=8):
+    """
+    Deterministic CIFAR-100 dataloader for embedding extraction.
+
+    Uses test-time transforms (no augmentation) and shuffle=False so that
+    sample ordering is reproducible across calls.
+    """
+    data_folder = get_data_folder()
+
+    test_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+    ])
+
+    embed_set = CIFAR100Instance(root=data_folder, download=True,
+                                 train=True, transform=test_transform)
+    embed_loader = DataLoader(embed_set, batch_size=batch_size,
+                              shuffle=False, num_workers=num_workers)
+    return embed_loader
+
+
+def get_cifar100_dataloaders_rdx(batch_size=128, num_workers=8,
+                                 selected_indices=None):
+    """
+    CIFAR-100 dataloaders for RDX-based training.
+
+    When *selected_indices* is provided, only those training samples are
+    included in the training DataLoader (via ``torch.utils.data.Subset``).
+    The returned *n_data* always reflects the **full** training-set size
+    so that memory-bank sizing remains correct.
+    """
+    data_folder = get_data_folder()
+
+    train_transform = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+    ])
+    test_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+    ])
+
+    full_train_set = CIFAR100Instance(root=data_folder, download=True,
+                                      train=True, transform=train_transform)
+    n_data = len(full_train_set)
+
+    if selected_indices is not None:
+        train_set = Subset(full_train_set, selected_indices)
+    else:
+        train_set = full_train_set
+
+    train_loader = DataLoader(train_set, batch_size=batch_size,
+                              shuffle=True, num_workers=num_workers)
+
+    test_set = datasets.CIFAR100(root=data_folder, download=True,
+                                 train=False, transform=test_transform)
+    test_loader = DataLoader(test_set, batch_size=int(batch_size/2),
+                             shuffle=False, num_workers=int(num_workers/2))
 
     return train_loader, test_loader, n_data
