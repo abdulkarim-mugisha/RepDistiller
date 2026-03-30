@@ -194,3 +194,82 @@ def compute_rdx_triplet_table(emb_s, emb_t, anchor_idx=None,
             neg_idx[start:end] = neg_cols
 
     return pos_idx, neg_idx, weights
+
+
+def compute_rdx_contrast_table(emb_s, emb_t, anchor_idx=None,
+                               gamma=0.1, beta=5.0, neg_pool_k=1024,
+                               batch_size=512):
+    """
+    For every sample, find its RDX-informed positive and a pool of negatives.
+
+    * **positive** — argmax of teacher-unique affinity (A^{01}):
+      the anchor point whose teacher groups it with the sample but
+      the student does not. The student should *pull* toward it.
+    * **negatives** — top-k student-unique affinity (A^{10}) anchors:
+      the anchor points the student over-groups; these should be
+      pushed away more strongly.
+
+    We also compute per-sample RDX weights using the mean combined
+    affinity: mean(exp(-β·diff) + exp(β·diff)).
+
+    Args:
+        emb_s, emb_t, anchor_idx, gamma, beta, batch_size:
+            same as :func:`compute_rdx_scores`.
+        neg_pool_k: number of negative candidates to store per sample.
+
+    Returns:
+        pos_idx: (N,) int64 array — global dataset index of each positive.
+        neg_pool: (N, K) int64 array — global indices for negative pool.
+        weights: (N,) float32 array — per-sample RDX affinity weights.
+    """
+    N = len(emb_s)
+    (emb_s_t, emb_t_t, anc_s, anc_t,
+     M, anchor_set, anchor_to_col, device) = _prepare_anchors(
+        emb_s, emb_t, anchor_idx)
+
+    pos_idx = np.zeros(N, dtype=np.int64)
+    neg_k = min(max(1, neg_pool_k), max(1, M - 1))
+    neg_pool = np.zeros((N, neg_k), dtype=np.int64)
+    weights = np.ones(N, dtype=np.float32)
+
+    use_anchor_map = anchor_idx is not None
+
+    print(f"    mining contrast pairs for {N} samples against {M} anchors "
+          f"(gamma={gamma}, beta={beta}, neg_pool_k={neg_k})")
+
+    for start in range(0, N, batch_size):
+        end = min(start + batch_size, N)
+        B = end - start
+
+        diff = _compute_diff_batch(emb_s_t, emb_t_t, anc_s, anc_t,
+                                    start, end, gamma, device)
+
+        diff_pos = diff.clone()
+        diff_neg = diff.clone()
+        _mask_self(diff_pos, start, M, anchor_set, anchor_to_col, device, 1e9)
+        _mask_self(diff_neg, start, M, anchor_set, anchor_to_col, device, -1e9)
+
+        # positive: teacher-unique (A^{01} = exp(-beta * diff))
+        pos_cols = diff_pos.argmin(dim=1)
+
+        # negatives: student-unique (A^{10} = exp(beta * diff))
+        neg_cols = diff_neg.topk(neg_k, dim=1).indices
+
+        # per-sample combined affinity weight (exclude self)
+        a01 = torch.exp(-beta * diff)
+        a10 = torch.exp(beta * diff)
+        _mask_self(a01, start, M, anchor_set, anchor_to_col, device, 0.0)
+        _mask_self(a10, start, M, anchor_set, anchor_to_col, device, 0.0)
+        weights[start:end] = ((a01 + a10).sum(dim=1) / max(1, M - 1)).cpu().numpy()
+
+        pos_cols = pos_cols.cpu().numpy()
+        neg_cols = neg_cols.cpu().numpy()
+
+        if use_anchor_map:
+            pos_idx[start:end] = anchor_idx[pos_cols]
+            neg_pool[start:end] = anchor_idx[neg_cols]
+        else:
+            pos_idx[start:end] = pos_cols
+            neg_pool[start:end] = neg_cols
+
+    return pos_idx, neg_pool, weights

@@ -14,6 +14,7 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
+from torch.utils.data import DataLoader, Subset
 
 
 from models import model_dict
@@ -22,17 +23,18 @@ from models.util import Connector, Translator, Paraphraser
 
 from dataset.cifar100 import get_cifar100_dataloaders, get_cifar100_dataloaders_sample
 from dataset.cifar100 import get_cifar100_dataloaders_rdx, get_cifar100_embed_loader
-from dataset.cifar100 import get_cifar100_dataloaders_rdx_triplet
+from dataset.cifar100 import get_cifar100_dataloaders_rdx_triplet, get_cifar100_dataloaders_rdx_contrast
 
 from helper.util import adjust_learning_rate
 
 from distiller_zoo import DistillKL, HintLoss, Attention, Similarity, Correlation, VIDLoss, RKDLoss
-from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss, RDXTripletLoss
+from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss, RDXTripletLoss, RDXContrastLoss
 from crd.criterion import CRDLoss
 
 from helper.loops import train_distill as train, validate
 from helper.pretrain import init
 from helper.rdx_utils import compute_rdx_curriculum_order, compute_rdx_triplet_lookup
+from helper.rdx_utils import compute_rdx_contrast_lookup
 
 
 def parse_option():
@@ -71,7 +73,7 @@ def parse_option():
     parser.add_argument('--distill', type=str, default='kd', choices=['kd', 'hint', 'attention', 'similarity',
                                                                       'correlation', 'vid', 'crd', 'kdsvd', 'fsp',
                                                                       'rkd', 'pkt', 'abound', 'factor', 'nst',
-                                                                      'rdx_triplet'])
+                                                                      'rdx_triplet', 'rdx_contrast'])
     parser.add_argument('--trial', type=str, default='1', help='trial id')
 
     parser.add_argument('-r', '--gamma', type=float, default=1, help='weight for classification')
@@ -212,11 +214,18 @@ def main():
     use_curriculum = opt.sampling == 'curriculum'
 
     if opt.dataset == 'cifar100':
-        if opt.distill in ['crd']:
+        if opt.distill == 'crd':
             train_loader, val_loader, n_data = get_cifar100_dataloaders_sample(batch_size=opt.batch_size,
                                                                                num_workers=opt.num_workers,
                                                                                k=opt.nce_k,
                                                                                mode=opt.mode)
+        elif opt.distill == 'rdx_contrast':
+            train_loader, val_loader, n_data, rdx_train_set = \
+                get_cifar100_dataloaders_rdx_contrast(batch_size=opt.batch_size,
+                                                      num_workers=opt.num_workers,
+                                                      nce_k=opt.nce_k)
+            embed_loader = get_cifar100_embed_loader(
+                batch_size=opt.batch_size, num_workers=opt.num_workers)
         elif opt.distill == 'rdx_triplet':
             train_loader, val_loader, n_data, rdx_train_set = \
                 get_cifar100_dataloaders_rdx_triplet(
@@ -267,6 +276,15 @@ def main():
         opt.t_dim = feat_t[-1].shape[1]
         opt.n_data = n_data
         criterion_kd = CRDLoss(opt)
+        module_list.append(criterion_kd.embed_s)
+        module_list.append(criterion_kd.embed_t)
+        trainable_list.append(criterion_kd.embed_s)
+        trainable_list.append(criterion_kd.embed_t)
+    elif opt.distill == 'rdx_contrast':
+        opt.s_dim = feat_s[-1].shape[1]
+        opt.t_dim = feat_t[-1].shape[1]
+        opt.n_data = n_data
+        criterion_kd = RDXContrastLoss(opt)
         module_list.append(criterion_kd.embed_s)
         module_list.append(criterion_kd.embed_t)
         trainable_list.append(criterion_kd.embed_s)
@@ -366,6 +384,8 @@ def main():
 
     # routine
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if opt.distill == 'rdx_contrast':
+        opt.rdx_weight_table = torch.ones(n_data, device=device)
     for epoch in range(1, opt.epochs + 1):
 
         refresh = _should_refresh_rdx(epoch, opt)
@@ -380,6 +400,20 @@ def main():
                 beta=opt.rdx_beta,
             )
             rdx_train_set.update_triplet_table(pos_idx, neg_idx, weights)
+        if opt.distill == 'rdx_contrast' and refresh:
+            print("==> Refreshing RDX contrast table (epoch {})...".format(epoch))
+            neg_pool_k = min(1024, opt.nce_k)
+            pos_idx, neg_pool, weights = compute_rdx_contrast_lookup(
+                model_s, model_t, embed_loader, device,
+                anchor_n=opt.rdx_anchor_n,
+                gamma=opt.rdx_gamma,
+                beta=opt.rdx_beta,
+                neg_pool_k=neg_pool_k,
+            )
+            rdx_train_set.update_rdx_contrast_table(
+                pos_idx, neg_pool, weights, nce_k=opt.nce_k)
+            opt.rdx_weight_table = torch.as_tensor(
+                weights, dtype=torch.float32, device=device)
 
         # --- Curriculum learning ---
         if use_curriculum:
@@ -396,11 +430,20 @@ def main():
             frac = _curriculum_fraction(epoch, opt)
             n_use = max(opt.batch_size, int(n_data * frac))
             selected = curriculum_order[:n_use].tolist()
-            train_loader, _, _ = get_cifar100_dataloaders_rdx(
-                batch_size=opt.batch_size,
-                num_workers=opt.num_workers,
-                selected_indices=selected,
-            )
+            if opt.distill == 'rdx_contrast':
+                train_set = Subset(rdx_train_set, selected)
+                train_loader = DataLoader(
+                    train_set,
+                    batch_size=opt.batch_size,
+                    shuffle=True,
+                    num_workers=opt.num_workers,
+                )
+            else:
+                train_loader, _, _ = get_cifar100_dataloaders_rdx(
+                    batch_size=opt.batch_size,
+                    num_workers=opt.num_workers,
+                    selected_indices=selected,
+                )
             print("==> Curriculum: using {}/{} samples ({:.0f}%)".format(
                 n_use, n_data, frac * 100))
 

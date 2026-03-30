@@ -93,7 +93,7 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
 
     end = time.time()
     for idx, data in enumerate(train_loader):
-        if opt.distill in ['crd']:
+        if opt.distill in ['crd', 'rdx_contrast']:
             input, target, index, contrast_idx = data
         elif opt.distill == 'rdx_triplet':
             input, target, index, pos_input, neg_input, rdx_weight = data
@@ -106,12 +106,17 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
             input = input.cuda()
             target = target.cuda()
             index = index.cuda()
-            if opt.distill in ['crd']:
+            if opt.distill in ['crd', 'rdx_contrast']:
                 contrast_idx = contrast_idx.cuda()
             if opt.distill == 'rdx_triplet':
                 pos_input = pos_input.float().cuda()
                 neg_input = neg_input.float().cuda()
                 rdx_weight = rdx_weight.float().cuda()
+        if opt.distill == 'rdx_contrast':
+            if hasattr(opt, 'rdx_weight_table') and opt.rdx_weight_table is not None:
+                rdx_weight = opt.rdx_weight_table.index_select(0, index)
+            else:
+                rdx_weight = torch.ones(index.size(0), device=index.device)
 
         # ===================forward=====================
         preact = False
@@ -137,6 +142,10 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
             f_s = feat_s[-1]
             f_t = feat_t[-1]
             loss_kd = criterion_kd(f_s, f_t, index, contrast_idx)
+        elif opt.distill == 'rdx_contrast':
+            f_s = feat_s[-1]
+            f_t = feat_t[-1]
+            loss_kd = criterion_kd(f_s, f_t, index, contrast_idx, rdx_weight)
         elif opt.distill == 'attention':
             g_s = feat_s[1:-1]
             g_t = feat_t[1:-1]

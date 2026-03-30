@@ -160,7 +160,7 @@ class CIFAR100InstanceSample(datasets.CIFAR100):
 
 
 def get_cifar100_dataloaders_sample(batch_size=128, num_workers=8, k=4096, mode='exact',
-                                    is_sample=True, percent=1.0):
+                                    is_sample=True, percent=1.0, selected_indices=None):
     """
     cifar 100
     """
@@ -177,15 +177,21 @@ def get_cifar100_dataloaders_sample(batch_size=128, num_workers=8, k=4096, mode=
         transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
     ])
 
-    train_set = CIFAR100InstanceSample(root=data_folder,
-                                       download=True,
-                                       train=True,
-                                       transform=train_transform,
-                                       k=k,
-                                       mode=mode,
-                                       is_sample=is_sample,
-                                       percent=percent)
-    n_data = len(train_set)
+    full_train_set = CIFAR100InstanceSample(root=data_folder,
+                                            download=True,
+                                            train=True,
+                                            transform=train_transform,
+                                            k=k,
+                                            mode=mode,
+                                            is_sample=is_sample,
+                                            percent=percent)
+    n_data = len(full_train_set)
+
+    if selected_indices is not None:
+        train_set = Subset(full_train_set, selected_indices)
+    else:
+        train_set = full_train_set
+
     train_loader = DataLoader(train_set,
                               batch_size=batch_size,
                               shuffle=True,
@@ -247,6 +253,51 @@ class CIFAR100RDXTriplet(CIFAR100Instance):
         return img, target, index, pos_img, neg_img, w
 
 
+class CIFAR100RDXContrast(CIFAR100Instance):
+    """CIFAR100 dataset that returns RDX-informed contrast indices.
+
+    The returned contrast indices are shaped (K+1,) with the positive at
+    index 0 followed by K negatives. Before :meth:`update_rdx_contrast_table`
+    is called, the positive and negatives default to the anchor itself.
+    """
+
+    def __init__(self, *args, **kwargs):
+        nce_k = kwargs.pop('nce_k', None)
+        super().__init__(*args, **kwargs)
+        self._pos_idx = None
+        self._neg_pool = None
+        self._weights = None
+        self._nce_k = int(nce_k) if nce_k is not None else None
+
+    def update_rdx_contrast_table(self, pos_idx, neg_pool, weights, nce_k=None):
+        """Set per-sample positive/negative pool indices and affinity weights."""
+        self._pos_idx = pos_idx
+        self._neg_pool = neg_pool
+        self._weights = weights
+        if nce_k is not None:
+            self._nce_k = int(nce_k)
+
+    def __getitem__(self, index):
+        img, target = self.data[index], self.targets[index]
+        img = Image.fromarray(img)
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if self._pos_idx is None or self._neg_pool is None or self._nce_k is None:
+            pos_i = index
+            k = 1 if self._nce_k is None else self._nce_k
+            neg_idx = np.full((k,), index, dtype=np.int64)
+            sample_idx = np.hstack((np.asarray([pos_i], dtype=np.int64), neg_idx))
+            return img, target, index, sample_idx
+
+        pos_i = int(self._pos_idx[index])
+        neg_pool = self._neg_pool[index]
+        replace = len(neg_pool) < self._nce_k
+        neg_idx = np.random.choice(neg_pool, self._nce_k, replace=replace)
+        sample_idx = np.hstack((np.asarray([pos_i], dtype=np.int64), neg_idx))
+        return img, target, index, sample_idx
+
+
 def get_cifar100_dataloaders_rdx_triplet(batch_size=128, num_workers=8,
                                           selected_indices=None):
     """
@@ -274,6 +325,48 @@ def get_cifar100_dataloaders_rdx_triplet(batch_size=128, num_workers=8,
 
     full_train_set = CIFAR100RDXTriplet(root=data_folder, download=True,
                                          train=True, transform=train_transform)
+    n_data = len(full_train_set)
+
+    if selected_indices is not None:
+        train_set = Subset(full_train_set, selected_indices)
+    else:
+        train_set = full_train_set
+
+    train_loader = DataLoader(train_set, batch_size=batch_size,
+                              shuffle=True, num_workers=num_workers)
+
+    test_set = datasets.CIFAR100(root=data_folder, download=True,
+                                 train=False, transform=test_transform)
+    test_loader = DataLoader(test_set, batch_size=int(batch_size / 2),
+                             shuffle=False, num_workers=int(num_workers / 2))
+
+    return train_loader, test_loader, n_data, full_train_set
+
+
+def get_cifar100_dataloaders_rdx_contrast(batch_size=128, num_workers=8,
+                                           nce_k=4096, selected_indices=None):
+    """
+    CIFAR-100 dataloaders for RDX contrastive training.
+
+    Returns the *full_train_set* handle so that the training loop can call
+    ``full_train_set.update_rdx_contrast_table(pos, neg_pool, weights)``.
+    """
+    data_folder = get_data_folder()
+
+    train_transform = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+    ])
+    test_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+    ])
+
+    full_train_set = CIFAR100RDXContrast(root=data_folder, download=True,
+                                          train=True, transform=train_transform,
+                                          nce_k=nce_k)
     n_data = len(full_train_set)
 
     if selected_indices is not None:

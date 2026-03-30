@@ -10,7 +10,7 @@ from __future__ import print_function
 import numpy as np
 import torch
 
-from rdx.sampling import compute_rdx_scores, compute_rdx_triplet_table
+from rdx.sampling import compute_rdx_scores, compute_rdx_triplet_table, compute_rdx_contrast_table
 
 
 @torch.no_grad()
@@ -146,3 +146,45 @@ def compute_rdx_triplet_lookup(model_s, model_t, embed_loader, device,
     )
 
     return pos_idx, neg_idx, weights
+
+
+def compute_rdx_contrast_lookup(model_s, model_t, embed_loader, device,
+                                 anchor_n=0, gamma=0.1, beta=5.0,
+                                 neg_pool_k=1024, random_state=42):
+    """
+    Compute per-sample positive and negative pool indices for RDX contrastive loss.
+
+    Returns:
+        pos_idx: (N,) int64 array — positive index for each sample.
+        neg_pool: (N, K) int64 array — negative pool per sample.
+        weights: (N,) float32 array — per-sample RDX affinity weights.
+    """
+    print("==> RDX Contrast: extracting student embeddings...")
+    emb_s = extract_embeddings(model_s, embed_loader, device)
+    print(f"    shape = {emb_s.shape}")
+
+    print("==> RDX Contrast: extracting teacher embeddings...")
+    emb_t = extract_embeddings(model_t, embed_loader, device)
+    print(f"    shape = {emb_t.shape}")
+
+    N = len(emb_s)
+
+    anchor_idx = None
+    if 0 < anchor_n < N:
+        np.random.seed(random_state)
+        anchor_idx = np.sort(
+            np.random.choice(N, size=anchor_n, replace=False))
+        print(f"==> RDX Contrast: using {anchor_n} anchor points")
+    else:
+        print(f"==> RDX Contrast: using all {N} samples as anchors")
+
+    print("==> RDX Contrast: mining positives/negatives...")
+    pos_idx, neg_pool, weights = compute_rdx_contrast_table(
+        emb_s, emb_t,
+        anchor_idx=anchor_idx,
+        gamma=gamma,
+        beta=beta,
+        neg_pool_k=neg_pool_k,
+    )
+
+    return pos_idx, neg_pool, weights
