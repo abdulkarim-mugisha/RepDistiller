@@ -1,11 +1,9 @@
 # Representation Difference Distillation (RDD)
 
 This repo contains the implementation of 
-[Representational Difference Distillation](https://drive.google.com/file/d/1Is9-a2ZMwBdPYS7piE1mn8NuHTZYFg_p/view), a knowledge distillation method that exploits representational differences between teacher and student models.
+[Representational Difference Distillation](https://drive.google.com/file/d/1Is9-a2ZMwBdPYS7piE1mn8NuHTZYFg_p/view), a knowledge distillation method that exploits representational differences between teacher and student models. Read the blog [here](https://divinrkz.com/blog/research/rdd-distillation).
 
-<p align="center">
-  <img src="/assets/rdd_overview.png" width="85%">
-</p>
+
 
 ## Overview
 
@@ -13,7 +11,7 @@ RDD is a knowledge distillation framework that uses representational difference 
 
 **Core components:**
 
-- **Asymmetric affinity matrices** (A<sup>01</sup> / A<sup>10</sup>) that capture directional representational relationships between teacher and student
+- **Asymmetric affinity matrices** (A01 / A10) that capture directional representational relationships between teacher and student
 - **Momentum memory bank** for efficient, stable contrastive estimation across the dataset
 - **constrastive loss** that smoothly encourages the student's representations to align with the teacher's in the disagreement region
 - **Per-sample confusion weighting** that up-weights samples in the student's zone of proximal development — where learning signal is richest
@@ -49,15 +47,17 @@ python train_student.py \
 
 **Flags:**
 
-| Flag | Description |
-|------|-------------|
-| `--path_t` | Path to the pretrained teacher model |
+
+| Flag        | Description                                     |
+| ----------- | ----------------------------------------------- |
+| `--path_t`  | Path to the pretrained teacher model            |
 | `--model_s` | Student architecture (see `models/__init__.py`) |
-| `--distill` | Distillation method (`rdx_contrast` for RDD) |
-| `-r` | Weight of cross-entropy loss (default: `1`) |
-| `-a` | Weight of KD loss (default: `None`) |
-| `-b` | Weight of the RDD loss (default: `None`) |
-| `--trial` | Experiment ID for multiple runs |
+| `--distill` | Distillation method (`rdx_contrast` for RDD)    |
+| `-r`        | Weight of cross-entropy loss (default: `1`)     |
+| `-a`        | Weight of KD loss (default: `None`)             |
+| `-b`        | Weight of the RDD loss (default: `None`)        |
+| `--trial`   | Experiment ID for multiple runs                 |
+
 
 #### RDD sampling examples
 
@@ -103,16 +103,16 @@ python train_student.py \
 ```
 
 
+| Flag                                       | Description                                                                    |
+| ------------------------------------------ | ------------------------------------------------------------------------------ |
+| `--sampling`                               | `standard` (default) or `curriculum` for RDX difficulty-based curriculum       |
+| `--curriculum_start_frac`                  | Initial fraction of easiest (RDX-scored) samples (default: `0.3`)              |
+| `--curriculum_pace_epochs`                 | Epochs to ramp from that fraction to the full set (default: `100`)             |
+| `--rdx_start_epoch`                        | First epoch at which RDX tables / curriculum use scored subsets (default: `1`) |
+| `--rdx_refresh_epochs`                     | Re-mine every N epochs (`0` = once; default: `0`)                              |
+| `--rdx_anchor_n`                           | Number of anchor images for scoring (`0` = all; default: `0`)                  |
+| `--rdx_gamma`, `--rdx_beta`, `--rdx_kna_k` | RDX affinity / curriculum hyperparameters (see `train_student.py`)             |
 
-| Flag | Description |
-|------|-------------|
-| `--sampling` | `standard` (default) or `curriculum` for RDX difficulty-based curriculum |
-| `--curriculum_start_frac` | Initial fraction of easiest (RDX-scored) samples (default: `0.3`) |
-| `--curriculum_pace_epochs` | Epochs to ramp from that fraction to the full set (default: `100`) |
-| `--rdx_start_epoch` | First epoch at which RDX tables / curriculum use scored subsets (default: `1`) |
-| `--rdx_refresh_epochs` | Re-mine every N epochs (`0` = once; default: `0`) |
-| `--rdx_anchor_n` | Number of anchor images for scoring (`0` = all; default: `0`) |
-| `--rdx_gamma`, `--rdx_beta`, `--rdx_kna_k` | RDX affinity / curriculum hyperparameters (see `train_student.py`) |
 
 ### 3. Combine RDD with KD
 
@@ -132,8 +132,8 @@ sh scripts/run_cifar_vanilla.sh
 ```
 
 ## Benchmark Results on CIFAR-100
-Performance is measured by top-1 classification accuracy (%). Results are shown in the paper.
 
+Performance is measured by top-1 classification accuracy (%). Results are shown in the paper.
 
 ## Project Structure
 
@@ -149,9 +149,9 @@ Performance is measured by top-1 classification accuracy (%). Results are shown 
 ```
 
 ## Maintainers
+
 - **AbdulKarim Mugisha**
 - **Divin Irakiza** — [divinrkz](https://divinrkz.com)
-
 
 ## Acknowledgement
 
@@ -166,3 +166,4 @@ The starter code for this project was adapted from the [RepDistiller](https://gi
   year={2026}
 }
 ```
+
